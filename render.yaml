@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: zep-therapy-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:8080
+    envVars:
+      - key: ZEP_API_KEY
+        sync: false

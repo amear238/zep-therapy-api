@@ -1,5 +1,4 @@
 import os
-import json
 from flask import Flask, request, jsonify
 from zep_cloud.client import Zep
 
@@ -20,22 +19,19 @@ def get_zep_client():
 def get_context():
     try:
         client = get_zep_client()
-        last_message = request.args.get("last_message", "")
 
-        # Get memory for the user
-        memory = client.memory.get(
-            session_id="phase2-session-latest",
-            last_n=6
+        # V3 SDK: thread.get_user_context
+        context = client.thread.get_user_context(
+            thread_id="phase2-session-latest"
         )
 
-        context_text = memory.context if memory.context else "No prior session memory found."
+        context_text = context.context if context.context else "No prior session memory found."
 
         return jsonify({
             "context": f"[ZEP MEMORY]\n{context_text}\n[END ZEP MEMORY]"
         })
 
     except Exception as e:
-        # Return empty context on error — don't break the therapy session
         return jsonify({
             "context": f"[ZEP MEMORY]\nMemory retrieval unavailable: {str(e)}\n[END ZEP MEMORY]"
         }), 200
@@ -56,38 +52,55 @@ def store_session():
 
         session_id = data.get("session_id")
         content = data.get("content", "")
-        role_type = data.get("role_type", "system")
         role = data.get("role", "SummaryMaster")
 
         if not session_id:
             return jsonify({"error": "session_id is required"}), 400
 
-        # Add session memory to Zep
-        client.memory.add(
-            session_id=session_id,
+        # V3 SDK: thread.create
+        try:
+            client.thread.create(
+                thread_id=session_id,
+                user_id=USER_ID
+            )
+        except Exception:
+            pass  # Thread may already exist
+
+        # V3 SDK: thread.add_messages
+        # role_type is now "role", role is now "name"
+        client.thread.add_messages(
+            thread_id=session_id,
             messages=[
                 {
-                    "role_type": role_type,
-                    "role": role,
+                    "role": "system",
+                    "name": role,
                     "content": content
                 }
             ]
         )
 
-        # Also update the "latest" session pointer for context retrieval
+        # Mirror to latest thread
         try:
-            client.memory.add(
-                session_id="phase2-session-latest",
+            client.thread.create(
+                thread_id="phase2-session-latest",
+                user_id=USER_ID
+            )
+        except Exception:
+            pass
+
+        try:
+            client.thread.add_messages(
+                thread_id="phase2-session-latest",
                 messages=[
                     {
-                        "role_type": role_type,
-                        "role": role,
+                        "role": "system",
+                        "name": role,
                         "content": content
                     }
                 ]
             )
         except Exception:
-            pass  # Non-fatal if latest pointer update fails
+            pass
 
         return jsonify({
             "status": "success",
@@ -100,7 +113,6 @@ def store_session():
 
 # ─────────────────────────────────────────
 # GET /health
-# Deployment health check
 # ─────────────────────────────────────────
 @app.route("/health", methods=["GET"])
 def health():

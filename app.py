@@ -11,8 +11,10 @@ import requests as http
 from datetime import datetime, timedelta
 from pathlib import Path
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 USER_ID   = "amear-bani-ahmad"

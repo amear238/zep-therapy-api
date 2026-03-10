@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 USER_ID   = "amear-bani-ahmad"
 ROOT      = Path(__file__).parent
 CACHE_TTL = timedelta(minutes=30)
-ZEP_BASE  = "https://api.zep.ai/api/v2"
+ZEP_BASE  = "https://api.getzep.com/api/v2"
 
 # In-memory chat_id tracker — per worker, resets on restart.
 # Render free tier runs single-worker so this is acceptable.
@@ -56,7 +56,7 @@ def load_kb(env_var, rel_path, label):
 
 def _zep_headers():
     return {
-        "Authorization": f"Bearer {env('ZEP_API_KEY')}",
+        "Authorization": f"Api-Key {env('ZEP_API_KEY')}",
         "Content-Type": "application/json",
     }
 

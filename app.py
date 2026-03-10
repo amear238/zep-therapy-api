@@ -20,7 +20,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 USER_ID   = "amear-bani-ahmad"
 ROOT      = Path(__file__).parent
 CACHE_TTL = timedelta(minutes=30)
-ZEP_BASE  = "https://api.getzep.com/api/v2"
 
 # In-memory chat_id tracker — per worker, resets on restart.
 # Render free tier runs single-worker so this is acceptable.
@@ -56,23 +55,22 @@ def load_kb(env_var, rel_path, label):
 
 # ── Zep helpers ────────────────────────────────────────────────────────────────
 
-def _zep_headers():
-    return {
-        "Authorization": f"Api-Key {env('ZEP_API_KEY')}",
-        "Content-Type": "application/json",
-    }
+def _zep_client():
+    from zep_cloud.client import Zep
+    return Zep(api_key=env("ZEP_API_KEY"))
 
 
 def fetch_zep_memory():
-    """GET /v2/users/{user_id}/memory — mirrors zep-context.sh exactly."""
+    """Fetch user context from the most recent Zep thread via SDK."""
     try:
-        r = http.get(
-            f"{ZEP_BASE}/users/{USER_ID}/memory",
-            headers=_zep_headers(),
-            timeout=10,
-        )
-        r.raise_for_status()
-        return r.text
+        client = _zep_client()
+        threads = client.user.get_threads(USER_ID)
+        if not threads:
+            return "[NO ZEP THREADS]"
+        # Pick the most recently created thread
+        latest = max(threads, key=lambda t: t.created_at)
+        ctx = client.thread.get_user_context(latest.thread_id)
+        return ctx.context or "[EMPTY ZEP CONTEXT]"
     except Exception as e:
         logging.error("Zep memory fetch failed: %s", e)
         return f"[ZEP UNAVAILABLE - {e}]"
@@ -83,27 +81,29 @@ def zep_block(content):
 
 
 def zep_store(session_id, user_id, role_type, role, content):
-    """Write a message to a Zep session via zep_cloud SDK."""
-    from zep_cloud.client import Zep
+    """Write a message to a Zep thread via zep_cloud SDK."""
     from zep_cloud.types import Message
 
-    client = Zep(api_key=env("ZEP_API_KEY"))
+    # Map role_type to valid SDK role values
+    role_map = {"system": "system", "user": "user", "assistant": "assistant"}
+    sdk_role = role_map.get(role_type, "system")
 
+    client = _zep_client()
     try:
-        client.memory.add(
-            session_id=session_id,
-            messages=[Message(role_type=role_type, role=role, content=content)],
+        client.thread.add_messages(
+            thread_id=session_id,
+            messages=[Message(role=sdk_role, content=content)],
         )
     except Exception as first_err:
-        # Session may not exist yet — create it then retry once.
-        if "not found" in str(first_err).lower() or "session" in str(first_err).lower():
+        # Thread may not exist yet — create it then retry once.
+        if "not found" in str(first_err).lower() or "thread" in str(first_err).lower():
             try:
-                client.memory.add_session(session_id=session_id, user_id=user_id)
+                client.thread.create(thread_id=session_id, user_id=user_id)
             except Exception as e:
-                logging.warning("Session creation warning: %s", e)
-            client.memory.add(
-                session_id=session_id,
-                messages=[Message(role_type=role_type, role=role, content=content)],
+                logging.warning("Thread creation warning: %s", e)
+            client.thread.add_messages(
+                thread_id=session_id,
+                messages=[Message(role=sdk_role, content=content)],
             )
         else:
             raise

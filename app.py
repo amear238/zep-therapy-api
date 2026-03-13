@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Flask app for Render deployment — Therapeutic AI Pipeline
-Endpoints: /health  /store  /context  /initialize
+Endpoints: /health  /store  /context  /initialize  /daily-insights  /kb-update
 Python 3.9 compatible.
 """
 
 import os
+import re
 import logging
-import requests as http
 from datetime import datetime, timedelta
 from pathlib import Path
 from flask import Flask, request, jsonify
@@ -237,6 +237,161 @@ def initialize():
     except Exception as e:
         logging.error("/initialize error: %s", e)
         return jsonify({"context": zep_block("[ZEP UNAVAILABLE]")})
+
+
+# ── Daily Insights helpers ─────────────────────────────────────────────────────
+
+INSIGHTS_LOG = ROOT / "daily-insights" / "insights-log.md"
+INSIGHTS_START = "---DAILY-INSIGHTS-START---"
+INSIGHTS_END = "---DAILY-INSIGHTS-END---"
+
+KB_TARGETS = {
+    "rolling-summary": ROOT / "knowledge-base" / "rolling-summary.md",
+    "intake-summary": ROOT / "knowledge-base" / "intake-summary.md",
+    "kb-reference": ROOT / "knowledge-base" / "knowledge-base-reference.md",
+}
+
+
+def parse_insights_block(raw):
+    """Parse a DAILY-INSIGHTS block into structured dict."""
+    result = {"raw": raw}
+
+    def field(name):
+        m = re.search(rf"^{name}:\s*(.+)$", raw, re.MULTILINE)
+        return m.group(1).strip() if m else None
+
+    result["session_date"] = field("SESSION_DATE")
+    result["session_number"] = field("SESSION_NUMBER")
+
+    # Mantras: pipe-separated
+    mantras = field("MANTRAS")
+    result["mantras"] = [m.strip() for m in mantras.split("|")] if mantras else []
+
+    # Patterns: pipe-separated
+    patterns = field("PATTERNS")
+    result["patterns"] = [p.strip() for p in patterns.split("|")] if patterns else []
+
+    # Risk flags: key:level pairs, pipe-separated
+    rf_raw = field("RISK_FLAGS")
+    risk_flags = {}
+    if rf_raw:
+        for entry in rf_raw.split("|"):
+            parts = entry.strip().split(":", 1)
+            if len(parts) == 2:
+                risk_flags[parts[0].strip()] = parts[1].strip()
+    result["risk_flags"] = risk_flags
+
+    # Priority daily: framework | directive
+    pd_raw = field("PRIORITY_DAILY")
+    if pd_raw and "|" in pd_raw:
+        parts = pd_raw.split("|", 1)
+        result["priority_daily"] = {"framework": parts[0].strip(), "directive": parts[1].strip()}
+    elif pd_raw:
+        result["priority_daily"] = {"framework": pd_raw, "directive": ""}
+    else:
+        result["priority_daily"] = None
+
+    # Habits: name|trigger|purpose
+    habits_raw = field("HABITS")
+    if habits_raw:
+        parts = [h.strip() for h in habits_raw.split("|")]
+        if len(parts) >= 3:
+            result["habits"] = [{"name": parts[0], "trigger": parts[1], "purpose": parts[2]}]
+        else:
+            result["habits"] = [{"name": habits_raw, "trigger": "", "purpose": ""}]
+    else:
+        result["habits"] = []
+
+    # Planner flags: flag|detail
+    pf_raw = field("PLANNER_FLAGS")
+    if pf_raw:
+        parts = [p.strip() for p in pf_raw.split("|")]
+        if len(parts) >= 2:
+            result["planner_flags"] = [{"flag": parts[0], "detail": parts[1]}]
+        else:
+            result["planner_flags"] = [{"flag": pf_raw, "detail": ""}]
+    else:
+        result["planner_flags"] = []
+
+    return result
+
+
+def sanitize_ascii(text):
+    """Strip curly quotes, em dashes, and smart apostrophes."""
+    replacements = {
+        "\u201c": '"', "\u201d": '"',  # curly double quotes
+        "\u2018": "'", "\u2019": "'",  # curly single quotes
+        "\u2014": "--", "\u2013": "-",  # em/en dashes
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
+@app.route("/daily-insights", methods=["GET", "POST"])
+def daily_insights():
+    """Return the most recent DAILY-INSIGHTS block as structured JSON."""
+    try:
+        if not INSIGHTS_LOG.exists():
+            return jsonify({"error": "no insights available", "raw": ""})
+
+        text = INSIGHTS_LOG.read_text(encoding="utf-8")
+
+        # Find the LAST insights block
+        last_start = text.rfind(INSIGHTS_START)
+        last_end = text.rfind(INSIGHTS_END)
+
+        if last_start == -1 or last_end == -1 or last_end <= last_start:
+            return jsonify({"error": "no insights available", "raw": ""})
+
+        raw = text[last_start + len(INSIGHTS_START):last_end].strip()
+        result = parse_insights_block(raw)
+        logging.info("/daily-insights: returning session %s", result.get("session_number"))
+        return jsonify(result)
+
+    except Exception as e:
+        logging.error("/daily-insights error: %s", e)
+        return jsonify({"error": str(e), "raw": ""})
+
+
+@app.route("/kb-update", methods=["POST"])
+def kb_update():
+    """Append a planner update to a knowledge-base file."""
+    try:
+        data = request.get_json(force=True) or {}
+
+        target = data.get("target", "")
+        content = data.get("content", "")
+        source = data.get("source", "")
+        action = data.get("action", "append")
+        date = data.get("date", datetime.utcnow().strftime("%Y-%m-%d"))
+
+        # Validation
+        if target not in KB_TARGETS:
+            return jsonify({"status": "error", "message": f"invalid target: {target}"}), 400
+        if not content:
+            return jsonify({"status": "error", "message": "content is required"}), 400
+        if not source:
+            return jsonify({"status": "error", "message": "source is required"}), 400
+        if len(content) > 5000:
+            return jsonify({"status": "error", "message": "content exceeds 5000 char limit"}), 400
+
+        content = sanitize_ascii(content)
+        target_path = KB_TARGETS[target]
+
+        if action == "append":
+            entry = f"\n\n---\n## PLANNER UPDATE -- {date}\n{content}\n---\n"
+            with open(target_path, "a", encoding="utf-8") as f:
+                f.write(entry)
+            bytes_written = len(entry.encode("utf-8"))
+            logging.info("/kb-update: appended %d bytes to %s from %s", bytes_written, target, source)
+            return jsonify({"status": "success", "target": target, "action": action, "bytes_written": bytes_written})
+        else:
+            return jsonify({"status": "error", "message": f"unsupported action: {action}"}), 400
+
+    except Exception as e:
+        logging.error("/kb-update error: %s", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

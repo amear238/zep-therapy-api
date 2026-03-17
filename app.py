@@ -7,6 +7,7 @@ Python 3.9 compatible.
 
 import os
 import re
+import time
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -223,14 +224,23 @@ def initialize():
         zep_content = fetch_zep_memory()
 
         if chat_id and is_chat_new(chat_id):
+            session_num = next_session_number()
+            brief = None
             try:
-                session_num = next_session_number()
                 brief = run_gemini_initializer(zep_content, session_num)
-                combined = f"{brief}\n\n---\n\n{zep_block(zep_content)}"
                 logging.info("Initialize: Gemini brief generated for chat_id %s (session %d)", chat_id, session_num)
+            except Exception as first_err:
+                logging.error("Gemini initializer attempt 1 failed (chat_id %s, session %d): %s — retrying in 3s", chat_id, session_num, first_err)
+                time.sleep(3)
+                try:
+                    brief = run_gemini_initializer(zep_content, session_num)
+                    logging.info("Initialize: Gemini brief generated on retry for chat_id %s (session %d)", chat_id, session_num)
+                except Exception as second_err:
+                    logging.error("Gemini initializer attempt 2 also failed (chat_id %s, session %d): %s — returning Zep-only fallback", chat_id, session_num, second_err)
+
+            if brief is not None:
+                combined = f"{brief}\n\n---\n\n{zep_block(zep_content)}"
                 return jsonify({"context": combined})
-            except Exception as e:
-                logging.error("Gemini initializer failed, falling back to Zep only: %s", e)
 
         return jsonify({"context": zep_block(zep_content)})
 
